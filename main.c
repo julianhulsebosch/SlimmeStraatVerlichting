@@ -1,28 +1,3 @@
-/*
- * Slimme Straatverlichting - AVR128DB28
- * DALI TX op PD1 via optocoupler
- *
- * States:
- *   S_IDLE   ? wacht op PIR of geluid, telt idle timeout
- *   S_ON     ? lamp aan, timer loopt, PIR verlengt timer
- *   S_ALARM  ? lamp knippert, geluid gedetecteerd
- *   S_SLEEP  ? Power-Down sleep, wacht op PIR (PD2 rising edge)
- *
- * Timings via TCB0 (20ms tick):
- *   TIMER_5SEC  = 250 ticks = 5 seconden
- *   GELUID_3SEC = 150 ticks = 3 seconden
- *   IDLE_1MIN   = 3000 ticks = 60 seconden
- *   KNIPPER_T   =  25 ticks = 0.5 seconden per halve periode
- *
- * KERNREGELS:
- *  1. DALI frames alleen bij state-overgang, nooit in een ISR of poll-loop.
- *  2. ISR's zetten alleen vlags of tellers, geen events.
- *  3. PIR ISR zet pir_flag; main verwerkt dit via verwerkPIR()
- *     zodat de ISR nooit E_TIMER kan overschrijven.
- *  4. setEvent() overschrijft nooit een bestaand event,
- *     behalve E_TIMER dat altijd de hoogste prioriteit heeft.
- */
-
 #include "mcc_generated_files/system/system.h"
 #include "dali_tx.h"
 #include <avr/sleep.h>
@@ -30,80 +5,74 @@
 
 #define F_CPU 4000000UL
 
-/* ---------- Drempelwaarden ---------- */
-#define GELUID_WAARDE   230     // 8-bit ADC waarde (adc_res >> 4)
-#define TIMER_5SEC      250     // 250 x 20ms = 5 seconden
-#define GELUID_3SEC     150     // 150 x 20ms = 3 seconden
-#define IDLE_1MIN       3000    // 3000 x 20ms = 60 seconden
-#define KNIPPER_T       25      //  25 x 20ms = 0.5 seconden (halve periode)
+#define GELUID_DREMPEL_WAARDE   230
+#define TIMER_5SEC      250     /* 250 x 20ms = 5 seconden   */
+#define GELUID_3SEC     150     /* 150 x 20ms = 3 seconden   */
+#define IDLE_1MIN       3000    /* 3000 x 20ms = 60 seconden */
+#define KNIPPER_T       25      /*  25 x 20ms = 0.5 seconden */
 
-/* ---------- ADC prescaler waarden ---------- */
 #define ADC_PRESC_NORMAAL   ADC_PRESC_DIV2_gc
 #define ADC_PRESC_LAAG      ADC_PRESC_DIV256_gc
 
-/* ---------- Vluchtige variabelen (gedeeld met ISR's) ---------- */
-volatile uint16_t adc_res       = 0;    // Ruwe ADC uitslag
-volatile uint8_t  sendflag      = 0;    // Nieuwe ADC meting klaar
-volatile uint8_t  geluidActief  = 0;    // Geluid boven drempel, timer loopt
-volatile uint16_t timerTeller   = 0;    // Telt 20ms ticks voor 5s timer
-volatile uint16_t idleTeller    = 0;    // Telt 20ms ticks voor idle timeout
-volatile uint16_t geluidTeller  = 0;    // Telt 20ms ticks voor geluidvenster
-volatile uint16_t knipperTeller = 0;    // Telt 20ms ticks voor knipper periode
-volatile uint8_t  knipperen     = 0;    // 1 = lamp knippert via TCB0
-volatile uint8_t  knipper_flag  = 0;    // Gezet door ISR, main doet de DALI call
-volatile uint8_t  lampAan       = 0;    // Huidige lamp staat (voor knipperen)
-volatile uint8_t  pir_flag      = 0;    // Gezet door PIR ISR, verwerkt in main
+typedef enum { S_IDLE, S_ON, S_ALARM, S_SLEEP }           states;
+typedef enum { E_NA, E_TIMER, E_PIR, E_GELUID, E_SLEEP }  events;
+typedef enum { F_ENTRY, F_ACTIVITY, F_EXIT }               flow;
 
-/* ---------- State machine ---------- */
-typedef enum { S_IDLE, S_ON, S_ALARM, S_SLEEP } states;
-typedef enum { E_NA, E_TIMER, E_PIR, E_GELUID, E_SLEEP } events;
+/* volatile omdat de TCB0 ISR currentState leest en currentEvent schrijft */
+volatile states currentState = S_IDLE;
+volatile events currentEvent = E_NA;
 
-states currentState = S_IDLE;
-events currentEvent = E_NA;
+states nextState   = S_IDLE;
+flow   currentFlow = F_ENTRY;
 
-/* ---------- Functiedeclaraties ---------- */
+volatile uint16_t adc_res       = 0;
+volatile uint8_t  sendflag      = 0;
+volatile uint8_t  geluidActief  = 0;
+volatile uint16_t timerTeller   = 0;
+volatile uint16_t idleTeller    = 0;
+volatile uint16_t geluidTeller  = 0;
+volatile uint16_t knipperTeller = 0;
+volatile uint8_t  knipperen     = 0;
+volatile uint8_t  knipper_flag  = 0;
+volatile uint8_t  lampAan       = 0;
+volatile uint8_t  pir_flag      = 0;
+
 static void setADCPrescaler(uint8_t presc);
 static void setEvent(events e);
 static void resetEvent(void);
 static void startTimer(void);
-static void startIdleTimer(void);
+static void verlengTimer(void);
 static uint8_t verwerkADC(void);
 static void verwerkPIR(void);
-static void verwerkKnipper(void);
 static void daliAan(void);
 static void daliUit(void);
-static void doIDLE(void);
-static void doON(void);
-static void doALARM(void);
-static void doSLEEP(void);
+
+static void entry_IDLE(void);    static void activity_IDLE(void);    static void exit_IDLE(void);
+static void entry_ON(void);      static void activity_ON(void);      static void exit_ON(void);
+static void entry_ALARM(void);   static void activity_ALARM(void);   static void exit_ALARM(void);
+static void entry_SLEEP(void);   static void activity_SLEEP(void);   static void exit_SLEEP(void);
+
 void ADC0_Interrupt_handler(void);
 void TCB0_InterruptHandler(void);
 void PIR_interruptHandler(void);
 
-/* ============================================================
- * DALI hulpfuncties
- * Alleen aanroepen bij state-overgangen in main, nooit in ISR.
- * ============================================================ */
+/* ?? DALI ??????????????????????????????????????????????????? */
+
 static void daliAan(void)
 {
-    while (DALI_TX_Busy()) {}
     DALI_LampOn();
     lampAan = 1;
 }
 
 static void daliUit(void)
 {
-    while (DALI_TX_Busy()) {}
     DALI_LampOff();
     lampAan = 0;
 }
 
-/* ============================================================
- * setEvent
- * Overschrijft nooit een bestaand event, behalve E_TIMER
- * dat altijd de hoogste prioriteit heeft.
- * Prioriteit: E_TIMER > E_SLEEP > E_GELUID > E_PIR
- * ============================================================ */
+/* ?? Events ????????????????????????????????????????????????? */
+
+/* E_TIMER heeft altijd voorrang; andere events alleen als slot leeg is */
 static void setEvent(events e)
 {
     if (e == E_TIMER)
@@ -120,9 +89,16 @@ static void resetEvent(void)
     currentEvent = E_NA;
 }
 
-/* ============================================================
- * Main
- * ============================================================ */
+/* Verlengt de 5s timer en sluit het bijbehorende event af.
+   Gebruikt bij E_PIR in S_ON en S_ALARM.                   */
+static void verlengTimer(void)
+{
+    startTimer();
+    resetEvent();
+}
+
+/* ?? Main ??????????????????????????????????????????????????? */
+
 int main(void)
 {
     SYSTEM_Initialize();
@@ -139,176 +115,275 @@ int main(void)
     _delay_ms(50);
 
     TCB0_Start();
-    startIdleTimer();
+    idleTeller = 0;
 
     while (1)
     {
-        verwerkPIR();       /* pir_flag omzetten naar E_PIR event */
-        verwerkKnipper();   /* knipper_flag omzetten naar DALI toggle */
+        verwerkPIR();
 
         switch (currentState)
         {
-            case S_IDLE:  doIDLE();  break;
-            case S_ON:    doON();    break;
-            case S_ALARM: doALARM(); break;
-            case S_SLEEP: doSLEEP(); break;
+            case S_IDLE:
+                switch (currentEvent)
+                {
+                    case E_PIR:
+                        if (geluidActief)
+                        {
+                            nextState = S_ALARM;
+                        }
+                        else
+                        {
+                            nextState = S_ON;
+                        }
+                        resetEvent();
+                        break;
+
+                    case E_GELUID:
+                        resetEvent();
+                        break;
+
+                    case E_SLEEP:
+                        nextState = S_SLEEP;
+                        resetEvent();
+                        break;
+
+                    default: break;
+                }
+                switch (currentFlow)
+                {
+                    case F_ENTRY:
+                        entry_IDLE();
+                        currentFlow = F_ACTIVITY;
+                    case F_ACTIVITY:
+                        activity_IDLE();
+                        if (nextState == currentState) break;
+                        currentFlow = F_EXIT;
+                    case F_EXIT:
+                        exit_IDLE();
+                        currentFlow = F_ENTRY;
+                        break;
+                }
+                break;
+
+            case S_ON:
+                 switch (currentEvent)
+                {
+                    case E_PIR:
+                        verlengTimer();
+                        break;
+
+                    case E_GELUID:
+                        nextState = S_ALARM;
+                        resetEvent();
+                        break;
+
+                    case E_TIMER:
+                        nextState = S_IDLE;
+                        resetEvent();
+                        break;
+
+                    default: break;
+                }
+                switch (currentFlow)
+                {
+                    case F_ENTRY:
+                        entry_ON();
+                        currentFlow = F_ACTIVITY;
+                    case F_ACTIVITY:
+                        activity_ON();
+                        if (nextState == currentState) break;
+                        currentFlow = F_EXIT;
+                    case F_EXIT:
+                        exit_ON();
+                        currentFlow = F_ENTRY;
+                        break;
+                }
+                break;
+
+            case S_ALARM:
+                switch (currentEvent)
+                {
+                    case E_PIR:
+                        verlengTimer();
+                        break;
+
+                    case E_TIMER:
+                        nextState = S_IDLE;
+                        resetEvent();
+                        break;
+
+                    default:
+                        break;
+                }
+                switch (currentFlow)
+                {
+                    case F_ENTRY:
+                        entry_ALARM();
+                        currentFlow = F_ACTIVITY;
+                    case F_ACTIVITY:
+                        activity_ALARM();
+                        if (nextState == currentState) break;
+                        currentFlow = F_EXIT;
+                    case F_EXIT:
+                        exit_ALARM();
+                        currentFlow = F_ENTRY;
+                        break;
+                }
+                break;
+
+            case S_SLEEP:
+                switch (currentFlow)
+                {
+                    case F_ENTRY:
+                        entry_SLEEP();
+                        currentFlow = F_ACTIVITY;
+                    case F_ACTIVITY:
+                        activity_SLEEP();
+                        if (nextState == currentState) break;
+                        currentFlow = F_EXIT;
+                    case F_EXIT:
+                        exit_SLEEP();
+                        currentFlow = F_ENTRY;
+                        break;
+                }
+                break;
+
             default: break;
         }
+
+        currentState = nextState;
     }
 }
 
-/* ============================================================
- * State functies
- * ============================================================ */
+/* ?? S_IDLE ????????????????????????????????????????????????? */
 
-/*
- * S_IDLE ? lamp uit, wacht op PIR of geluid.
- * Idle timeout loopt via TCB0 ? E_SLEEP na 60s.
- */
-static void doIDLE(void)
+static void entry_IDLE(void)
+{
+    nextState = S_IDLE;
+    idleTeller = 0;
+}
+
+static void activity_IDLE(void)
+{
+    LED_SetHigh();
+    if (verwerkADC())
+        setEvent(E_GELUID);
+}
+
+static void exit_IDLE(void)
+{
+    /* lamp staat al uit */
+}
+
+/* ?? S_ON ??????????????????????????????????????????????????? */
+
+static void entry_ON(void)
+{
+    idleTeller = 0;
+    nextState = S_ON;
+    daliAan();
+    startTimer();
+}
+
+static void activity_ON(void)
 {
     if (verwerkADC())
         setEvent(E_GELUID);
 
-    switch (currentEvent)
-    {
-        case E_PIR:
-            idleTeller = 0;
-            if (geluidActief)
-            {
-                geluidActief = 0;
-                geluidTeller = 0;
-                knipperen    = 1;
-                knipperTeller = 0;
-                daliAan();
-                currentState = S_ALARM;
-            }
-            else
-            {
-                daliAan();
-                currentState = S_ON;
-            }
-            startTimer();
-            resetEvent();
-            break;
-
-        case E_GELUID:
-            idleTeller = 0;     /* geluid telt als activiteit */
-            resetEvent();
-            break;
-
-        case E_SLEEP:
-            currentState = S_SLEEP;
-            resetEvent();
-            break;
-
-        default: break;
-    }
+   
 }
 
-/*
- * S_ON ? lamp aan, 5s timer loopt.
- * PIR verlengt de timer, geluid stuurt door naar S_ALARM.
- */
-static void doON(void)
+static void exit_ON(void)
 {
-    idleTeller = 0;     /* niet slapen zolang lamp aan is */
+    LED_SetLow();
+    if (nextState == S_IDLE)
+        daliUit();
+    /* naar S_ALARM: lamp blijft aan */
+}
 
-    if (verwerkADC())
-        setEvent(E_GELUID);
+/* ?? S_ALARM ???????????????????????????????????????????????? */
 
-    switch (currentEvent)
+static void entry_ALARM(void)
+{
+    nextState = S_ALARM;
+    
+    idleTeller = 0;
+    geluidActief  = 0;
+    geluidTeller  = 0;
+    knipperen     = 1;
+    knipperTeller = 0;
+    knipper_flag  = 0;
+
+    startTimer();
+
+    if (!lampAan)
+        daliAan();
+}
+
+static void activity_ALARM(void)
+{
+    verwerkADC();
+
+    if (knipper_flag)
     {
-        case E_PIR:
-            startTimer();
-            resetEvent();
-            break;
+        knipper_flag = 0;
 
-        case E_GELUID:
-            geluidActief  = 0;
-            geluidTeller  = 0;
-            knipperen     = 1;
-            knipperTeller = 0;
-            currentState  = S_ALARM;
-            startTimer();
-            resetEvent();
-            break;
-
-        case E_TIMER:
-            knipperen    = 0;
+        if (lampAan)
             daliUit();
-            currentState = S_IDLE;
-            startIdleTimer();
-            resetEvent();
-            break;
-
-        default: break;
+        else
+            daliAan();
     }
 }
 
-/*
- * S_ALARM ? lamp knippert via TCB0.
- * PIR verlengt de timer.
- * Na 5s timer terug naar S_IDLE.
- */
-static void doALARM(void)
+static void exit_ALARM(void)
 {
-    idleTeller = 0;     /* niet slapen zolang alarm actief is */
-    verwerkADC();       /* geluidvenster bijhouden */
+    LED_SetLow();
+    knipperen    = 0;
+    knipper_flag = 0;
 
-    switch (currentEvent)
-    {
-        case E_PIR:
-            startTimer();
-            resetEvent();
-            break;
-
-        case E_TIMER:
-            knipperen    = 0;
-            daliUit();
-            currentState = S_IDLE;
-            startIdleTimer();
-            resetEvent();
-            break;
-
-        default: break;
-    }
+    daliUit();
 }
 
-/*
- * S_SLEEP ? Power-Down sleep.
- * ADC vertraagd voor lager verbruik. PD2 (Fully Async) wekt de chip.
- * Na wake-up worden tellers gereset en gaat de machine naar S_IDLE.
- */
-static void doSLEEP(void)
+/* ?? S_SLEEP ???????????????????????????????????????????????? */
+
+static void entry_SLEEP(void)
 {
-    knipperen = 0;
+    nextState = S_SLEEP;
     daliUit();
     _delay_ms(20);
-
     setADCPrescaler(ADC_PRESC_LAAG);
-    currentEvent  = E_NA;
-    pir_flag      = 0;
+}
+
+static void activity_SLEEP(void)
+{
+    pir_flag     = 0;
 
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
+
+    /* interrupt-flag wissen vóór sleep zodat een al-hoge PIR-lijn
+       de chip meteen wekt zonder dat de volgende beweging gemist wordt */
+    PORTD.INTFLAGS = PIN2_bm;
+
     sei();
-    sleep_cpu();        /* -- chip slaapt hier -- PIR op PD2 wekt op */
+    sleep_cpu();        /* chip slaapt hier ? PIR op PD2 wekt op */
     sleep_disable();
 
-    setADCPrescaler(ADC_PRESC_NORMAAL);
+    /* na wake-up nogmaals wissen; PIR-lijn kan nog steeds hoog staan */
+    PORTD.INTFLAGS = PIN2_bm;
 
-    idleTeller    = 0;
-    timerTeller   = 0;
-    pir_flag      = 0;  /* PIR vlag wissen na wake-up */
-    currentState  = S_IDLE;
-    /* currentEvent bevat nu E_PIR vanuit PIR_interruptHandler,
-       wordt in de volgende iteratie verwerkt via verwerkPIR() */
+    nextState = S_IDLE;
 }
 
-/* ============================================================
- * Hulpfuncties
- * ============================================================ */
+static void exit_SLEEP(void)
+{
+    setADCPrescaler(ADC_PRESC_NORMAAL);
+    idleTeller  = 0;
+    timerTeller = 0;
+    pir_flag    = 0;
+}
+
+/* ?? Hulpfuncties ??????????????????????????????????????????? */
 
 static void setADCPrescaler(uint8_t presc)
 {
@@ -323,21 +398,14 @@ static void startTimer(void)
     TCB0_Start();
 }
 
-static void startIdleTimer(void)
-{
-    idleTeller = 0;
-}
-
-/*
- * Lees ADC resultaat als sendflag gezet is.
- * Retourneert 1 als geluid boven drempel werd gedetecteerd.
- */
+/* leest ADC-resultaat als sendflag gezet is;
+   geeft 1 terug als geluid boven drempel werd gedetecteerd */
 static uint8_t verwerkADC(void)
 {
     if (!sendflag) return 0;
     uint8_t waarde = adc_res >> 4;  /* 12-bit naar 8-bit */
     sendflag = 0;
-    if (waarde > GELUID_WAARDE)
+    if (waarde > GELUID_DREMPEL_WAARDE)
     {
         geluidActief = 1;
         geluidTeller = 0;
@@ -346,11 +414,8 @@ static uint8_t verwerkADC(void)
     return 0;
 }
 
-/*
- * Zet pir_flag (gezet door ISR) om naar E_PIR event.
- * Atomaire lees-en-wis voorkomt race met de ISR.
- * Zo kan de PIR ISR nooit E_TIMER overschrijven.
- */
+/* zet pir_flag atomair om naar E_PIR zodat de PIR ISR nooit
+   een bestaand event kan overschrijven                       */
 static void verwerkPIR(void)
 {
     if (!pir_flag) return;
@@ -360,45 +425,18 @@ static void verwerkPIR(void)
     setEvent(E_PIR);
 }
 
-/*
- * Zet knipper_flag (gezet door ISR) om naar een DALI toggle.
- * DALI calls mogen nooit in een ISR staan vanwege de blocking wait.
- */
-static void verwerkKnipper(void)
-{
-    if (!knipper_flag) return;
-    cli();
-    knipper_flag = 0;
-    sei();
+/* ?? Interrupt handlers ????????????????????????????????????? */
 
-    if (lampAan)
-        daliUit();
-    else
-        daliAan();
-}
-
-/* ============================================================
- * Interrupt handlers
- * Geen DALI calls, geen blocking code, alleen vlags en tellers.
- * ============================================================ */
-
-/* ADC conversie klaar ? sla resultaat op en zet vlag */
 void ADC0_Interrupt_handler(void)
 {
     adc_res  = ADC0.RES;
     sendflag = 1;
 }
 
-/*
- * TCB0 ? 20ms tick.
- * Beheert alle software timers en het DALI knipper ritme.
- * E_TIMER en E_SLEEP worden direct geschreven (hoogste prioriteit).
- */
 void TCB0_InterruptHandler(void)
 {
     timerTeller++;
 
-    /* Geluidvenster aftellen */
     if (geluidActief)
     {
         geluidTeller++;
@@ -409,25 +447,23 @@ void TCB0_InterruptHandler(void)
         }
     }
 
-    /* Lamp knipperen in S_ALARM ? zet alleen een vlag, main doet de DALI call */
-    if (knipperen)
+    if (currentState == S_ALARM && knipperen)
     {
         knipperTeller++;
         if (knipperTeller >= KNIPPER_T)
         {
             knipperTeller = 0;
-            knipper_flag  = 1;  /* main loop roept verwerkKnipper() aan */
+            knipper_flag  = 1;
         }
     }
 
-    /* 5-seconden timeout ? hoogste prioriteit, altijd overschrijven */
+    /* E_TIMER heeft altijd voorrang ? direct schrijven, niet via setEvent() */
     if (timerTeller >= TIMER_5SEC)
     {
         timerTeller  = 0;
         currentEvent = E_TIMER;
     }
 
-    /* Idle timeout ? alleen tellen in S_IDLE */
     if (currentState == S_IDLE)
     {
         idleTeller++;
@@ -439,8 +475,8 @@ void TCB0_InterruptHandler(void)
     }
 }
 
-/* PIR interrupt ? zet alleen een vlag, main verwerkt via verwerkPIR() */
 void PIR_interruptHandler(void)
 {
     pir_flag = 1;
+    LED_SetHigh();
 }

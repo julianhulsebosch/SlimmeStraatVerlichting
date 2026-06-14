@@ -24,7 +24,7 @@ CLEAN_SUBPROJECTS=${CLEAN_SUBPROJECTS_${SUBPROJECTS}}
 
 
 # Project Name
-PROJECTNAME=SlimmeStraatVerlichting_Volledig_28_V8.X
+PROJECTNAME=SlimmeStraatVerlichting_Volledig_28_V9.X
 
 # Active Configuration
 DEFAULTCONF=default

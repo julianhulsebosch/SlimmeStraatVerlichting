@@ -3,6 +3,7 @@
     <type>com.microchip.mplab.nbide.embedded.makeproject</type>
     <configuration>
         <data xmlns="http://www.netbeans.org/ns/make-project/1">
+            <name>SlimmeStraatVerlichting_Volledig_28_V9</name>
             <name>SlimmeStraatVerlichting_Volledig_28_V8</name>
             <name>SlimmeStraatVerlichting_StateMachine_28_V7</name>
             <name>SlimmeStraatVerlichting_StateMachine_V6</name>
