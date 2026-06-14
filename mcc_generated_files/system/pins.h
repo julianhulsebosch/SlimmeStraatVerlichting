@@ -76,6 +76,25 @@
 #define PIR_EnableInterruptForLowLevelSensing() do { PORTD.PIN2CTRL = (PORTD.PIN2CTRL & ~PORT_ISC_gm) | 0x5 ; } while(0)
 #define PD2_SetInterruptHandler PIR_SetInterruptHandler
 
+//get/set LED aliases
+#define LED_SetHigh() do { PORTA_OUTSET = 0x80; } while(0)
+#define LED_SetLow() do { PORTA_OUTCLR = 0x80; } while(0)
+#define LED_Toggle() do { PORTA_OUTTGL = 0x80; } while(0)
+#define LED_GetValue() (VPORTA.IN & (0x1 << 7))
+#define LED_SetDigitalInput() do { PORTA_DIRCLR = 0x80; } while(0)
+#define LED_SetDigitalOutput() do { PORTA_DIRSET = 0x80; } while(0)
+#define LED_SetPullUp() do { PORTA_PIN7CTRL  |= PORT_PULLUPEN_bm; } while(0)
+#define LED_ResetPullUp() do { PORTA_PIN7CTRL  &= ~PORT_PULLUPEN_bm; } while(0)
+#define LED_SetInverted() do { PORTA_PIN7CTRL  |= PORT_INVEN_bm; } while(0)
+#define LED_ResetInverted() do { PORTA_PIN7CTRL  &= ~PORT_INVEN_bm; } while(0)
+#define LED_DisableInterruptOnChange() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x0 ; } while(0)
+#define LED_EnableInterruptForBothEdges() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x1 ; } while(0)
+#define LED_EnableInterruptForRisingEdge() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x2 ; } while(0)
+#define LED_EnableInterruptForFallingEdge() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x3 ; } while(0)
+#define LED_DisableDigitalInputBuffer() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x4 ; } while(0)
+#define LED_EnableInterruptForLowLevelSensing() do { PORTA.PIN7CTRL = (PORTA.PIN7CTRL & ~PORT_ISC_gm) | 0x5 ; } while(0)
+#define PA7_SetInterruptHandler LED_SetInterruptHandler
+
 //get/set DALI aliases
 #define DALI_SetHigh() do { PORTD_OUTSET = 0x2; } while(0)
 #define DALI_SetLow() do { PORTD_OUTCLR = 0x2; } while(0)
@@ -144,6 +163,27 @@ void PIR_DefaultInterruptHandler(void);
  * @return none
  */
 void PIR_SetInterruptHandler(void (* interruptHandler)(void)) ; 
+
+/**
+ * @ingroup  pinsdriver
+ * @brief Default Interrupt Handler for LED pin. 
+ *        This is a predefined interrupt handler to be used together with the LED_SetInterruptHandler() method.
+ *        This handler is called every time the LED ISR is executed. 
+ * @pre PIN_MANAGER_Initialize() has been called at least once
+ * @param none
+ * @return none
+ */
+void LED_DefaultInterruptHandler(void);
+
+/**
+ * @ingroup  pinsdriver
+ * @brief Interrupt Handler Setter for LED pin input-sense-config functionality.
+ *        Allows selecting an interrupt handler for LED at application runtime
+ * @pre PIN_MANAGER_Initialize() has been called at least once
+ * @param InterruptHandler function pointer.
+ * @return none
+ */
+void LED_SetInterruptHandler(void (* interruptHandler)(void)) ; 
 
 /**
  * @ingroup  pinsdriver

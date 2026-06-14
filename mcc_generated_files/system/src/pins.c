@@ -36,6 +36,7 @@
 
 static void (*IO_PD3_InterruptHandler)(void);
 static void (*PIR_InterruptHandler)(void);
+static void (*LED_InterruptHandler)(void);
 static void (*DALI_InterruptHandler)(void);
 
 void PIN_MANAGER_Initialize()
@@ -48,7 +49,7 @@ void PIN_MANAGER_Initialize()
     PORTF.OUT = 0x0;
 
   /* DIR Registers Initialization */
-    PORTA.DIR = 0x0;
+    PORTA.DIR = 0x80;
     PORTC.DIR = 0x0;
     PORTD.DIR = 0x2;
     PORTF.DIR = 0x0;
@@ -61,7 +62,7 @@ void PIN_MANAGER_Initialize()
     PORTA.PIN4CTRL = 0x0;
     PORTA.PIN5CTRL = 0x0;
     PORTA.PIN6CTRL = 0x0;
-    PORTA.PIN7CTRL = 0x0;
+    PORTA.PIN7CTRL = 0x80;
     PORTC.PIN0CTRL = 0x0;
     PORTC.PIN1CTRL = 0x0;
     PORTC.PIN2CTRL = 0x0;
@@ -102,6 +103,7 @@ void PIN_MANAGER_Initialize()
   // register default ISC callback functions at runtime; use these methods to register a custom function
     IO_PD3_SetInterruptHandler(IO_PD3_DefaultInterruptHandler);
     PIR_SetInterruptHandler(PIR_DefaultInterruptHandler);
+    LED_SetInterruptHandler(LED_DefaultInterruptHandler);
     DALI_SetInterruptHandler(DALI_DefaultInterruptHandler);
 }
 
@@ -132,6 +134,19 @@ void PIR_DefaultInterruptHandler(void)
     // or set custom function using PIR_SetInterruptHandler()
 }
 /**
+  Allows selecting an interrupt handler for LED at application runtime
+*/
+void LED_SetInterruptHandler(void (* interruptHandler)(void)) 
+{
+    LED_InterruptHandler = interruptHandler;
+}
+
+void LED_DefaultInterruptHandler(void)
+{
+    // add your LED interrupt custom code
+    // or set custom function using LED_SetInterruptHandler()
+}
+/**
   Allows selecting an interrupt handler for DALI at application runtime
 */
 void DALI_SetInterruptHandler(void (* interruptHandler)(void)) 
@@ -146,6 +161,11 @@ void DALI_DefaultInterruptHandler(void)
 }
 ISR(PORTA_PORT_vect)
 { 
+    // Call the interrupt handler for the callback registered at runtime
+    if(VPORTA.INTFLAGS & PORT_INT7_bm)
+    {
+       LED_InterruptHandler(); 
+    }
     /* Clear interrupt flags */
     VPORTA.INTFLAGS = 0xff;
 }
