@@ -1,9 +1,9 @@
+#define F_CPU 4000000UL
 #include "mcc_generated_files/system/system.h"
 #include "dali_tx.h"
 #include <avr/sleep.h>
 #include <util/delay.h>
 
-#define F_CPU 4000000UL
 
 #define GELUID_DREMPEL_WAARDE   230
 #define TIMER_5SEC      250     /* 250 x 20ms = 5 seconden   */
@@ -22,7 +22,7 @@ typedef enum { F_ENTRY, F_ACTIVITY, F_EXIT }               flow;
 volatile states currentState = S_IDLE;
 volatile events currentEvent = E_NA;
 
-states nextState   = S_IDLE;
+volatile states nextState   = S_IDLE;
 flow   currentFlow = F_ENTRY;
 
 volatile uint16_t adc_res       = 0;
@@ -102,6 +102,7 @@ static void verlengTimer(void)
 int main(void)
 {
     SYSTEM_Initialize();
+    LED_SetLow();
     DALI_TX_Init();
 
     ADC0_ConversionDoneCallbackRegister(ADC0_Interrupt_handler);
@@ -259,6 +260,7 @@ int main(void)
 
 static void entry_IDLE(void)
 {
+    LED_SetLow();
     nextState = S_IDLE;
     idleTeller = 0;
 }
@@ -296,8 +298,11 @@ static void activity_ON(void)
 static void exit_ON(void)
 {
     LED_SetLow();
-    if (nextState == S_IDLE)
+    if (nextState == S_IDLE){
         daliUit();
+        geluidActief = 0;    // ← dit mist
+        geluidTeller = 0;    // ← dit ook
+    }
     /* naar S_ALARM: lamp blijft aan */
 }
 
@@ -340,7 +345,8 @@ static void exit_ALARM(void)
     LED_SetLow();
     knipperen    = 0;
     knipper_flag = 0;
-
+    geluidActief = 0;
+    geluidTeller = 0;
     daliUit();
 }
 
@@ -356,12 +362,12 @@ static void entry_SLEEP(void)
 
 static void activity_SLEEP(void)
 {
-    pir_flag     = 0;
-
+    cli();
+    pir_flag = 0;
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
 
-    /* interrupt-flag wissen v��r sleep zodat een al-hoge PIR-lijn
+    /* interrupt-flag wissen vóór sleep zodat een al-hoge PIR-lijn
        de chip meteen wekt zonder dat de volgende beweging gemist wordt */
     PORTD.INTFLAGS = PIN2_bm;
 
