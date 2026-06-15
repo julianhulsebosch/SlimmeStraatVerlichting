@@ -5,7 +5,7 @@
 #include <util/delay.h>
 
 
-#define GELUID_DREMPEL_WAARDE   230
+#define GELUID_DREMPEL_WAARDE   250
 #define TIMER_5SEC      250     /* 250 x 20ms = 5 seconden   */
 #define GELUID_3SEC     150     /* 150 x 20ms = 3 seconden   */
 #define IDLE_1MIN       3000    /* 3000 x 20ms = 60 seconden */
@@ -127,28 +127,28 @@ int main(void)
             case S_IDLE:
                 switch (currentEvent)
                 {
-                    case E_PIR:
-                        if (geluidActief)
-                        {
-                            nextState = S_ALARM;
-                        }
-                        else
-                        {
-                            nextState = S_ON;
-                        }
-                        resetEvent();
-                        break;
+                 case E_PIR:
+                 if (geluidActief)
+                     nextState = S_ALARM;
+                 else
+                     nextState = S_ON;
+                 resetEvent();
+                 break;
 
-                    case E_GELUID:
-                        resetEvent();
-                        break;
+                case E_GELUID:
+                 resetEvent();
+                 break;
 
-                    case E_SLEEP:
-                        nextState = S_SLEEP;
-                        resetEvent();
-                        break;
+                case E_TIMER:       // ← dit mist
+                 resetEvent();   // timer heeft geen betekenis in IDLE
+                 break;
 
-                    default: break;
+                case E_SLEEP:
+                 nextState = S_SLEEP;
+                 resetEvent();
+                 break;
+
+        default: break;
                 }
                 switch (currentFlow)
                 {
@@ -260,14 +260,12 @@ int main(void)
 
 static void entry_IDLE(void)
 {
-    LED_SetLow();
-    nextState = S_IDLE;
+    LED_SetHigh();
     idleTeller = 0;
 }
 
 static void activity_IDLE(void)
 {
-    LED_SetHigh();
     if (verwerkADC())
         setEvent(E_GELUID);
 }
@@ -282,7 +280,6 @@ static void exit_IDLE(void)
 static void entry_ON(void)
 {
     idleTeller = 0;
-    nextState = S_ON;
     daliAan();
     startTimer();
 }
@@ -297,11 +294,12 @@ static void activity_ON(void)
 
 static void exit_ON(void)
 {
-    LED_SetLow();
+    
     if (nextState == S_IDLE){
+        LED_SetHigh();
         daliUit();
-        geluidActief = 0;    // ← dit mist
-        geluidTeller = 0;    // ← dit ook
+        geluidActief = 0;    // ? dit mist
+        geluidTeller = 0;    // ? dit ook
     }
     /* naar S_ALARM: lamp blijft aan */
 }
@@ -310,17 +308,13 @@ static void exit_ON(void)
 
 static void entry_ALARM(void)
 {
-    nextState = S_ALARM;
-    
-    idleTeller = 0;
+    idleTeller    = 0;
     geluidActief  = 0;
     geluidTeller  = 0;
     knipperen     = 1;
     knipperTeller = 0;
     knipper_flag  = 0;
-
     startTimer();
-
     if (!lampAan)
         daliAan();
 }
@@ -342,7 +336,7 @@ static void activity_ALARM(void)
 
 static void exit_ALARM(void)
 {
-    LED_SetLow();
+    LED_SetHigh();
     knipperen    = 0;
     knipper_flag = 0;
     geluidActief = 0;
@@ -354,7 +348,6 @@ static void exit_ALARM(void)
 
 static void entry_SLEEP(void)
 {
-    nextState = S_SLEEP;
     daliUit();
     _delay_ms(20);
     setADCPrescaler(ADC_PRESC_LAAG);
@@ -386,7 +379,6 @@ static void exit_SLEEP(void)
     setADCPrescaler(ADC_PRESC_NORMAAL);
     idleTeller  = 0;
     timerTeller = 0;
-    pir_flag    = 0;
 }
 
 /* ?? Hulpfuncties ??????????????????????????????????????????? */
@@ -484,5 +476,5 @@ void TCB0_InterruptHandler(void)
 void PIR_interruptHandler(void)
 {
     pir_flag = 1;
-    LED_SetHigh();
+    LED_SetLow();
 }
